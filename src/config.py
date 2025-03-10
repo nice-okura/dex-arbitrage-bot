@@ -12,16 +12,41 @@ class TokenPair:
     
     def as_tuple(self):
         return (self.base, self.quote)
+    
+    def for_dex(self, dex_name):
+        """DEX用のペア表記を返す"""
+        if dex_name == "uniswap_v3" or dex_name == "quickswap" or dex_name == "sushiswap":
+            return f"{self.base}-{self.quote}"
+        elif dex_name == "curve":
+            return f"{self.base.lower()}{self.quote.lower()}"
+        elif dex_name == "balancer":
+            return f"{self.base}-{self.quote}"
+        return f"{self.base}-{self.quote}"
+    
+    def for_cex(self, cex_name):
+        """CEX用のペア表記を返す"""
+        if cex_name == "bitbank":
+            return f"{self.base.lower()}_{self.quote.lower()}"
+        elif cex_name == "bitflyer":
+            return f"{self.base}_{self.quote}"
+        elif cex_name == "coincheck":
+            return f"{self.base.lower()}_{self.quote.lower()}"
+        elif cex_name == "zaif":
+            return f"{self.base.lower()}_{self.quote.lower()}"
+        elif cex_name == "bittrade":
+            return f"{self.base.lower()}{self.quote.lower()}"
+        return f"{self.base}{self.quote}"
 
 class DEXConfig:
-    def __init__(self, name: str, address: str, fee_percent: float):
+    def __init__(self, name: str, api_url: str, fee_percent: float):
         self.name = name
-        self.address = address
+        self.api_url = api_url
         self.fee_percent = fee_percent
 
 class CEXConfig:
-    def __init__(self, name: str, api_key: Optional[str] = None, api_secret: Optional[str] = None):
+    def __init__(self, name: str, api_url: str, api_key: Optional[str] = None, api_secret: Optional[str] = None):
         self.name = name
+        self.api_url = api_url
         self.api_key = api_key
         self.api_secret = api_secret
 
@@ -43,12 +68,6 @@ class AppConfig:
         # Slack通知設定
         self.slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL", "")
         
-        # PolygonScan API設定
-        self.polygonscan_api_key = os.getenv("POLYGONSCAN_API_KEY", "")
-        
-        # The Graph API設定
-        self.graph_api_key = os.getenv("GRAPH_API_KEY", "")
-        
         # 監視対象の通貨ペア
         self.token_pairs = self._load_token_pairs()
         
@@ -57,21 +76,10 @@ class AppConfig:
         
         # 監視対象のCEX
         self.cexes = self._load_cexes()
-        
-        # トークンアドレス (Polygon)
-        self.token_addresses = {
-            "MATIC": "0x0000000000000000000000000000000000001010",
-            "WMATIC": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
-            "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-            "USDC": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-            "DAI": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
-            "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
-            "WBTC": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6"
-        }
     
     def _load_token_pairs(self) -> List[TokenPair]:
         # 環境変数またはデフォルト値から通貨ペアを読み込む
-        pairs_env = os.getenv("TOKEN_PAIRS", "MATIC/USDT,USDC/DAI,WETH/USDT,WBTC/USDT")
+        pairs_env = os.getenv("TOKEN_PAIRS", "BTC/JPY,ETH/JPY,XRP/JPY,MATIC/USDT,ETH/BTC")
         pairs = []
         
         for pair_str in pairs_env.split(","):
@@ -84,39 +92,64 @@ class AppConfig:
     def _load_dexes(self) -> Dict[str, DEXConfig]:
         # 主要なDEXの設定を返す
         return {
+            "uniswap_v3": DEXConfig(
+                name="Uniswap V3",
+                api_url="https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
+                fee_percent=0.3  # 基本手数料
+            ),
             "quickswap": DEXConfig(
-                name="Quickswap",
-                address="0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff",  # QuickSwap Router
+                name="QuickSwap",
+                api_url="https://api.thegraph.com/subgraphs/name/sameepsi/quickswap-v3",
                 fee_percent=0.3
             ),
             "sushiswap": DEXConfig(
                 name="SushiSwap",
-                address="0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",  # SushiSwap Router
+                api_url="https://api.thegraph.com/subgraphs/name/sushiswap/exchange-polygon",
                 fee_percent=0.3
-            ),
-            "uniswap_v3": DEXConfig(
-                name="Uniswap V3",
-                address="0xE592427A0AEce92De3Edee1F18E0157C05861564",  # Uniswap V3 Router
-                fee_percent=0.3  # 実際にはプールによって異なる
             ),
             "curve": DEXConfig(
                 name="Curve",
-                address="0x8474DdbE98F5aA3179B3B3F5942D724aFcdec9f6",  # Curve Router
-                fee_percent=0.04  # 実際にはプールによって異なる
+                api_url="https://api.curve.fi/api/getPools/polygon/main",
+                fee_percent=0.04
+            ),
+            "balancer": DEXConfig(
+                name="Balancer",
+                api_url="https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-polygon-v2",
+                fee_percent=0.2
             )
         }
     
     def _load_cexes(self) -> Dict[str, CEXConfig]:
         # 主要なCEXの設定を返す
         return {
-            "binance": CEXConfig(
-                name="Binance",
-                api_key=os.getenv("BINANCE_API_KEY", ""),
-                api_secret=os.getenv("BINANCE_API_SECRET", "")
+            "bitbank": CEXConfig(
+                name="Bitbank",
+                api_url="https://public.bitbank.cc",
+                api_key=os.getenv("BITBANK_API_KEY", ""),
+                api_secret=os.getenv("BITBANK_API_SECRET", "")
             ),
-            "coinbase": CEXConfig(
-                name="Coinbase",
-                api_key=os.getenv("COINBASE_API_KEY", ""),
-                api_secret=os.getenv("COINBASE_API_SECRET", "")
+            "bitflyer": CEXConfig(
+                name="BitFlyer",
+                api_url="https://api.bitflyer.com/v1",
+                api_key=os.getenv("BITFLYER_API_KEY", ""),
+                api_secret=os.getenv("BITFLYER_API_SECRET", "")
+            ),
+            "coincheck": CEXConfig(
+                name="Coincheck",
+                api_url="https://coincheck.com/api",
+                api_key=os.getenv("COINCHECK_API_KEY", ""),
+                api_secret=os.getenv("COINCHECK_API_SECRET", "")
+            ),
+            "zaif": CEXConfig(
+                name="Zaif",
+                api_url="https://api.zaif.jp/api/1",
+                api_key=os.getenv("ZAIF_API_KEY", ""),
+                api_secret=os.getenv("ZAIF_API_SECRET", "")
+            ),
+            "bittrade": CEXConfig(
+                name="BitTrade",
+                api_url="https://api.bittrade.co.jp/v1",
+                api_key=os.getenv("BITTRADE_API_KEY", ""),
+                api_secret=os.getenv("BITTRADE_API_SECRET", "")
             )
         }

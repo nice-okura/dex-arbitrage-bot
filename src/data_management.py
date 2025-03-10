@@ -17,15 +17,14 @@ class DataManager:
         self.config = config
         self.redis = None
         self.db_path = "./data/arbitrage.db"
+        self.in_memory_cache = {}
         
         # ディレクトリの作成
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
     
     async def initialize(self):
         """データ管理モジュールを初期化する"""
-        # RedisとSQLiteの初期化を分離し、片方が失敗しても他方は実行されるようにする
-        
-        # SQLiteデータベースの初期化（Redisの成否に関わらず実行）
+        # SQLiteデータベースの初期化（最初に実行、必須コンポーネント）
         try:
             await self._init_sqlite_db()
             logger.info("SQLiteデータベースを初期化しました")
@@ -34,7 +33,7 @@ class DataManager:
             # SQLiteは必須なのでエラーを再スロー
             raise
         
-        # Redisの接続設定（失敗してもプログラムは継続）
+        # Redisの接続設定（オプショナルコンポーネント）
         try:
             self.redis = await aioredis.create_redis_pool(
                 f"redis://{self.config.redis_host}:{self.config.redis_port}",
@@ -46,7 +45,6 @@ class DataManager:
             logger.warning(f"Redisに接続できませんでした: {e}")
             logger.info("Redisなしでインメモリキャッシュを使用して続行します")
             self.redis = None
-            self.in_memory_cache = {}
     
     async def _init_sqlite_db(self):
         """SQLiteデータベースを初期化する"""
@@ -58,41 +56,46 @@ class DataManager:
     
     def _create_tables(self):
         """データベーステーブルを作成する"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # 価格データテーブル
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS prices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            exchange TEXT NOT NULL,
-            pair TEXT NOT NULL,
-            price REAL NOT NULL,
-            liquidity REAL,
-            timestamp INTEGER NOT NULL,
-            UNIQUE(exchange, pair, timestamp)
-        )
-        ''')
-        
-        # 裁定機会テーブル
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS arbitrage_opportunities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pair TEXT NOT NULL,
-            buy_exchange TEXT NOT NULL,
-            sell_exchange TEXT NOT NULL,
-            buy_price REAL NOT NULL,
-            sell_price REAL NOT NULL,
-            price_diff_percent REAL NOT NULL,
-            fees_percent REAL NOT NULL,
-            slippage_percent REAL NOT NULL,
-            net_profit_percent REAL NOT NULL,
-            timestamp INTEGER NOT NULL
-        )
-        ''')
-        
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 価格データテーブル
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS prices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exchange TEXT NOT NULL,
+                pair TEXT NOT NULL,
+                price REAL NOT NULL,
+                liquidity REAL,
+                timestamp INTEGER NOT NULL,
+                UNIQUE(exchange, pair, timestamp)
+            )
+            ''')
+            
+            # 裁定機会テーブル
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS arbitrage_opportunities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair TEXT NOT NULL,
+                buy_exchange TEXT NOT NULL,
+                sell_exchange TEXT NOT NULL,
+                buy_price REAL NOT NULL,
+                sell_price REAL NOT NULL,
+                price_diff_percent REAL NOT NULL,
+                fees_percent REAL NOT NULL,
+                slippage_percent REAL NOT NULL,
+                net_profit_percent REAL NOT NULL,
+                timestamp INTEGER NOT NULL
+            )
+            ''')
+            
+            conn.commit()
+            conn.close()
+            logger.debug("データベーステーブルを作成しました")
+        except Exception as e:
+            logger.error(f"データベーステーブル作成中にエラーが発生しました: {e}", exc_info=True)
+            raise  # エラーを再スローして上位に伝播
     
     async def save_price(self, exchange: str, pair: str, price_data: Dict[str, Any], timestamp: int):
         """価格データを保存する"""
@@ -128,6 +131,22 @@ class DataManager:
                     "liquidity": price_data.get("liquidity", 0),
                     "timestamp": timestamp
                 }
+                
+                # インメモリキャッシュのサイズを制限（各ペアの直近10件のみ保持）
+                history_key = f"price_history:{exchange}:{pair}"
+                if history_key not in self.in_memory_cache:
+                    self.in_memory_cache[history_key] = []
+                
+                history_data = self.in_memory_cache[history_key]
+                history_data.append({
+                    "price": price_data.get("price", 0),
+                    "liquidity": price_data.get("liquidity", 0),
+                    "timestamp": timestamp
+                })
+                
+                # 新しい順に10件に制限
+                history_data.sort(key=lambda x: x["timestamp"], reverse=True)
+                self.in_memory_cache[history_key] = history_data[:10]
             
             # SQLiteにも保存（長期保存用）
             await asyncio.get_event_loop().run_in_executor(
@@ -165,19 +184,20 @@ class DataManager:
         result = {}
         
         try:
-            if self.redis:
-                # すべての取引所からの価格データを取得
-                for exchange in list(self.config.dexes.keys()) + list(self.config.cexes.keys()):
+            # DEXとCEXのリストを結合
+            exchanges = list(self.config.dexes.keys()) + list(self.config.cexes.keys())
+            
+            for exchange in exchanges:
+                if self.redis:
+                    # Redisから最新の価格データを取得
                     key = f"price:{exchange}:{pair}"
                     data = await self.redis.get(key)
                     
                     if data:
                         price_data = json.loads(data)
                         result[exchange] = price_data
-            
-            else:
-                # インメモリキャッシュから取得
-                for exchange in list(self.config.dexes.keys()) + list(self.config.cexes.keys()):
+                else:
+                    # インメモリキャッシュから取得
                     key = f"price:{exchange}:{pair}"
                     if key in self.in_memory_cache:
                         result[exchange] = self.in_memory_cache[key]
@@ -202,17 +222,35 @@ class DataManager:
                     result.append(price_data)
             
             else:
-                # SQLiteから履歴データを取得
-                history_data = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self._get_price_history_from_sqlite,
-                    exchange,
-                    pair,
-                    start_time,
-                    end_time
-                )
+                # インメモリキャッシュから履歴データを取得
+                history_key = f"price_history:{exchange}:{pair}"
+                if history_key in self.in_memory_cache:
+                    history_data = self.in_memory_cache[history_key]
+                    
+                    # 時間範囲でフィルタリング
+                    for item in history_data:
+                        if start_time <= item["timestamp"] <= end_time:
+                            result.append(item)
                 
-                result = history_data
+                # 不足しているデータはSQLiteから補完
+                if len(result) < 10:  # 少なすぎる場合はSQLiteからも取得
+                    db_history = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self._get_price_history_from_sqlite,
+                        exchange,
+                        pair,
+                        start_time,
+                        end_time
+                    )
+                    
+                    # 既存のデータと重複を避けつつマージ
+                    existing_timestamps = {item["timestamp"] for item in result}
+                    for item in db_history:
+                        if item["timestamp"] not in existing_timestamps:
+                            result.append(item)
+            
+            # タイムスタンプでソート
+            result.sort(key=lambda x: x["timestamp"])
             
         except Exception as e:
             logger.error(f"価格履歴の取得中にエラーが発生しました: {e}", exc_info=True)
@@ -294,6 +332,55 @@ class DataManager:
             
         except Exception as e:
             logger.error(f"SQLiteへの裁定機会保存中にエラーが発生しました: {e}", exc_info=True)
+    
+    async def get_arbitrage_opportunities(self, start_time: int, end_time: int, min_profit_percent: float = 0.0) -> List[Dict[str, Any]]:
+        """指定した期間の裁定機会を取得する"""
+        result = []
+        
+        try:
+            # SQLiteから裁定機会を取得
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                self._get_arbitrage_from_sqlite,
+                start_time,
+                end_time,
+                min_profit_percent
+            )
+            
+        except Exception as e:
+            logger.error(f"裁定機会の取得中にエラーが発生しました: {e}", exc_info=True)
+        
+        return result
+    
+    def _get_arbitrage_from_sqlite(self, start_time: int, end_time: int, min_profit_percent: float) -> List[Dict[str, Any]]:
+        """SQLiteから裁定機会を取得する（同期処理）"""
+        result = []
+        
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                """
+                SELECT * FROM arbitrage_opportunities 
+                WHERE timestamp BETWEEN ? AND ? AND net_profit_percent >= ? 
+                ORDER BY timestamp DESC
+                """,
+                (start_time, end_time, min_profit_percent)
+            )
+            
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                result.append(dict(row))
+            
+            conn.close()
+            
+        except Exception as e:
+            logger.error(f"SQLiteからの裁定機会取得中にエラーが発生しました: {e}", exc_info=True)
+        
+        return result
     
     async def cleanup(self):
         """リソースをクリーンアップする"""

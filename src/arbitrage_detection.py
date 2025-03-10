@@ -77,6 +77,10 @@ class ArbitrageDetector:
                 exchange1 = exchanges[i]
                 exchange2 = exchanges[j]
                 
+                # 価格が取得できているか確認
+                if not prices[exchange1] or not prices[exchange2]:
+                    continue
+                
                 price1 = prices[exchange1].get("price", 0)
                 price2 = prices[exchange2].get("price", 0)
                 
@@ -141,8 +145,16 @@ class ArbitrageDetector:
         if exchange in self.config.dexes:
             return self.config.dexes[exchange].fee_percent
         
-        # CEXの場合（簡易的に一律0.1%と仮定）
-        return 0.1
+        # CEXの場合（一般的な取引手数料）
+        cex_fees = {
+            "bitbank": 0.12,
+            "bitflyer": 0.15,
+            "coincheck": 0.2,
+            "zaif": 0.2,
+            "bittrade": 0.15
+        }
+        
+        return cex_fees.get(exchange, 0.2)  # デフォルトは0.2%
     
     async def _notify_arbitrage(self, opportunity: Dict[str, Any]):
         """裁定機会を通知する"""
@@ -151,7 +163,7 @@ class ArbitrageDetector:
             message = self._create_notification_message(opportunity)
             
             # Slack通知の送信
-            if self.notifier:
+            if self.notifier and self.notifier.is_enabled():
                 await self.notifier.send_notification(message)
             
             # ログ出力

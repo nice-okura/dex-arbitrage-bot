@@ -13,9 +13,13 @@ class SlackNotifier:
         if not webhook_url:
             logger.warning("Slack webhook URLが設定されていません。Slack通知は無効です。")
     
+    def is_enabled(self) -> bool:
+        """Slack通知が有効かどうかを返す"""
+        return bool(self.webhook_url) and self.webhook_url.startswith("https://hooks.slack.com/")
+    
     async def send_notification(self, message: str):
         """Slackに通知を送信する"""
-        if not self.webhook_url:
+        if not self.is_enabled():
             logger.info(f"Slack通知（無効）: {message}")
             return
         

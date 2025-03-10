@@ -1,12 +1,12 @@
 # DEXアービトラージボット
 
-Polygonチェーン上で動作するDEXアービトラージボットです。価格モニタリングと裁定機会検出の機能を備えています。
+複数の取引所間の価格差を監視し、裁定取引の機会を検出するボットです。DEX（分散型取引所）とCEX（中央集権型取引所）間の価格差に対応しています。
 
 ## 機能
 
 1. **価格モニタリング**
    - 複数のDEXとCEXから価格データをリアルタイムで取得
-   - The GraphとPolygonScan APIを利用したオンチェーンデータの取得
+   - 各取引所のAPIを利用した安定的な価格取得
    - 価格データをRedisとSQLiteに保存
 
 2. **裁定機会検出**
@@ -14,6 +14,22 @@ Polygonチェーン上で動作するDEXアービトラージボットです。�
    - 手数料とスリッページを考慮した利益計算
    - 設定可能な裁定閾値（デフォルト0.5%）
    - Slack通知機能
+
+## 対応する取引所
+
+### DEX（分散型取引所）
+- Uniswap V3
+- QuickSwap
+- SushiSwap
+- Curve
+- Balancer
+
+### CEX（中央集権型取引所）
+- Bitbank
+- BitFlyer
+- Coincheck
+- Zaif
+- BitTrade
 
 ## インストール方法
 
@@ -47,7 +63,7 @@ Polygonチェーン上で動作するDEXアービトラージボットです。�
    ```
    cp .env.example .env
    ```
-   - 各APIキーやSlack Webhook URLなどを設定
+   - 各取引所のAPIキーやSlack Webhook URLなどを設定
 
 ## 使用方法
 
@@ -65,7 +81,6 @@ python main.py
 - `MIN_PROFIT_USD`: 最小利益額（USD）
 - `NOTIFICATION_COOLDOWN`: 通知クールダウン（秒）
 - `TOKEN_PAIRS`: 監視対象の通貨ペア（カンマ区切り）
-- `POLYGON_RPC_URL`: Polygon RPCのURL
 - `SLACK_WEBHOOK_URL`: Slack通知用Webhook URL
 
 ## プロジェクト構成
@@ -78,8 +93,7 @@ dex-arbitrage-bot/
 │   ├── price_monitoring.py # 価格モニタリングモジュール
 │   ├── arbitrage_detection.py # 裁定機会検出モジュール
 │   ├── data_management.py # データ管理モジュール
-│   ├── notification.py  # 通知モジュール
-│   └── contracts.py     # コントラクト関連モジュール
+│   └── notification.py  # 通知モジュール
 ├── data/                # データ保存ディレクトリ
 │   └── arbitrage.db     # SQLiteデータベース
 ├── logs/                # ログディレクトリ
@@ -98,19 +112,17 @@ dex-arbitrage-bot/
 
 2. **新しいDEXまたはCEXの追加**
    - `src/config.py`の`_load_dexes()`または`_load_cexes()`メソッドを更新
+   - `src/price_monitoring.py`に対応する取得メソッドを追加
 
 3. **通知方法の拡張**
    - `src/notification.py`に新しい通知クラスを追加
-
-4. **AWS環境への移行**
-   - SQLiteからRDSへ
-   - ローカルスクリプトからLambdaへ
 
 ## 注意事項
 
 - このボットは情報提供目的のみで利用してください
 - 実際の取引を行う前にリスク管理を徹底してください
 - APIキーやウォレットの秘密鍵は安全に管理してください
+- 各取引所のAPI利用規約を遵守してください
 
 ## ライセンス
 
