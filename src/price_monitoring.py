@@ -220,11 +220,10 @@ class PriceMonitor:
                 # GraphQLクエリを構築
                 query = """
                 {
-                  pairs(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderBy: reserveUSD, orderDirection: desc, first: 1) {
+                  pairs(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderDirection: desc, first: 1) {
                     id
                     token0Price
                     token1Price
-                    reserveUSD
                     token0 {
                       symbol
                       id
@@ -313,7 +312,7 @@ class PriceMonitor:
             try:
                 # GraphQLクエリを構築
                 query = """
-                {
+              n  {
                   pools(where: {
                     tokensList_contains_nocase: ["%s", "%s"]
                   }, orderBy: totalLiquidity, orderDirection: desc, first: 1) {
@@ -322,17 +321,17 @@ class PriceMonitor:
                     tokens {
                       symbol
                       address
-                      latestPrice {
-                        price
-                      }
+                      priceRate
                     }
                   }
                 }
                 """ % (pair.base, pair.quote)
                 
                 async with self.session.post(dex_config.api_url, json={"query": query}) as response:
+                    logger.debug(f"query: {query}")
                     if response.status == 200:
                         data = await response.json()
+                        logger.debug(f"Balancer response: {data}")
                         pools = data.get("data", {}).get("pools", [])
                         
                         if pools and pools[0]["tokens"]:

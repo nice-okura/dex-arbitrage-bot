@@ -16,7 +16,7 @@ def setup_logging():
     os.makedirs(log_dir, exist_ok=True)
     
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
             logging.FileHandler(f"{log_dir}/app.log"),

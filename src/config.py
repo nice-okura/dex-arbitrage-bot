@@ -1,6 +1,10 @@
-# src/config.py
+# src/config.py（更新版）
 import os
 from typing import Dict, List, Optional
+from dotenv import load_dotenv
+
+# 環境変数の読み込み
+load_dotenv()
 
 class TokenPair:
     def __init__(self, base: str, quote: str):
@@ -38,10 +42,11 @@ class TokenPair:
         return f"{self.base}{self.quote}"
 
 class DEXConfig:
-    def __init__(self, name: str, api_url: str, fee_percent: float):
+    def __init__(self, name: str, api_url: str, fee_percent: float, subgraph_id: Optional[str] = None):
         self.name = name
         self.api_url = api_url
         self.fee_percent = fee_percent
+        self.subgraph_id = subgraph_id
 
 class CEXConfig:
     def __init__(self, name: str, api_url: str, api_key: Optional[str] = None, api_secret: Optional[str] = None):
@@ -58,6 +63,9 @@ class AppConfig:
         self.slippage_tolerance = float(os.getenv("SLIPPAGE_TOLERANCE", "0.3"))    # %
         self.min_profit_usd = float(os.getenv("MIN_PROFIT_USD", "5.0"))           # USD
         self.notification_cooldown = int(os.getenv("NOTIFICATION_COOLDOWN", "300"))  # 秒 (5分)
+        
+        # The Graph API Key
+        self.graph_api_key = os.getenv("GRAPH_API_KEY", "")
         
         # Redis設定
         self.redis_host = os.getenv("REDIS_HOST", "localhost")
@@ -90,32 +98,56 @@ class AppConfig:
         return pairs
     
     def _load_dexes(self) -> Dict[str, DEXConfig]:
+        # The Graph Gateway URL（API Keyがある場合）
+        graph_base_url = "https://gateway.thegraph.com/api"
+        
+        # GraphQLエンドポイントを構築
+        def build_graph_url(subgraph_id):
+            if self.graph_api_key:
+                return f"{graph_base_url}/{self.graph_api_key}/subgraphs/id/{subgraph_id}"
+            else:
+                # APIキーがない場合は警告を出力
+                import logging
+                logging.warning("GRAPH_API_KEY環境変数が設定されていません。The Graph APIへのアクセスが制限される可能性があります。")
+                return f"{graph_base_url}/[API-KEY-REQUIRED]/subgraphs/id/{subgraph_id}"
+        
+        # 各DEXのサブグラフID
+        uniswap_subgraph_id = os.getenv("UNISWAP_SUBGRAPH_ID", "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV") 
+        sushiswap_subgraph_id = os.getenv("SUSHISWAP_SUBGRAPH_ID", "CKaCne3uUUEqT7Ei9jjZbQqTLntEno9LnFa4JnsqqBma")
+        quickswap_subgraph_id = os.getenv("QUICKSWAP_SUBGRAPH_ID", "FqsRcH1XqSjqVx9GRTvEJe959aCbKrcyGgDWBrUkG24g")
+        balancer_subgraph_id = os.getenv("BALANCER_SUBGRAPH_ID", "H9oPAbXnobBRq1cB3HDmbZ1E8MWQyJYQjT1QDJMrdbNp")
+        
         # 主要なDEXの設定を返す
         return {
             "uniswap_v3": DEXConfig(
                 name="Uniswap V3",
-                api_url="https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
-                fee_percent=0.3  # 基本手数料
+                api_url=build_graph_url(uniswap_subgraph_id),
+                fee_percent=0.3,  # 基本手数料
+                subgraph_id=uniswap_subgraph_id
             ),
             "quickswap": DEXConfig(
                 name="QuickSwap",
-                api_url="https://api.thegraph.com/subgraphs/name/sameepsi/quickswap-v3",
-                fee_percent=0.3
+                api_url=build_graph_url(quickswap_subgraph_id),
+                fee_percent=0.3,
+                subgraph_id=quickswap_subgraph_id
             ),
             "sushiswap": DEXConfig(
                 name="SushiSwap",
-                api_url="https://api.thegraph.com/subgraphs/name/sushiswap/exchange-polygon",
-                fee_percent=0.3
+                api_url=build_graph_url(sushiswap_subgraph_id),
+                fee_percent=0.3,
+                subgraph_id=sushiswap_subgraph_id
             ),
             "curve": DEXConfig(
                 name="Curve",
                 api_url="https://api.curve.fi/api/getPools/polygon/main",
-                fee_percent=0.04
+                fee_percent=0.04,
+                subgraph_id=None  # CurveはGraphQLを使用しない
             ),
             "balancer": DEXConfig(
                 name="Balancer",
-                api_url="https://api.thegraph.com/subgraphs/name/balancer-labs/balancer-polygon-v2",
-                fee_percent=0.2
+                api_url=build_graph_url(balancer_subgraph_id),
+                fee_percent=0.2,
+                subgraph_id=balancer_subgraph_id
             )
         }
     
