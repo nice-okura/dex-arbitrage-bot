@@ -3,12 +3,22 @@ import asyncio
 import logging
 import time
 import os
-import json
 from typing import Dict, Any, List, Tuple
 import aiohttp
 
 from src.config import AppConfig, TokenPair
 from src.data_management import DataManager
+from src.graphql import (
+    GraphQLClient,
+    get_uniswap_query,
+    get_sushiswap_query,
+    get_quickswap_query,
+    get_balancer_query,
+    parse_uniswap_response,
+    parse_sushiswap_response,
+    parse_quickswap_response,
+    parse_balancer_response
+)
 
 logger = logging.getLogger("dex_arbitrage_bot.price_monitoring")
 
@@ -20,6 +30,7 @@ class PriceMonitor:
         # 価格データのキャッシュ
         self.price_cache = {}
         self.session = None
+        self.graphql_client = None
     
     async def start_monitoring(self):
         """価格モニタリングを開始する"""
@@ -27,6 +38,7 @@ class PriceMonitor:
         
         # HTTPセッションの作成
         self.session = aiohttp.ClientSession()
+        self.graphql_client = GraphQLClient(self.session)
         
         try:
             while True:
@@ -48,6 +60,7 @@ class PriceMonitor:
                     
                     # ログ出力（開発時のみ詳細ログを出力）
                     if os.getenv("DEBUG", "false").lower() == "true":
+                        import json
                         logger.debug(f"価格データを更新しました: {json.dumps(all_prices, indent=2)}")
                     else:
                         # 実運用時は簡易ログ
@@ -61,6 +74,8 @@ class PriceMonitor:
                     await asyncio.sleep(5)  # エラー発生時は短い間隔で再試行
         finally:
             # セッションのクローズ
+            if self.graphql_client:
+                await self.graphql_client.close()
             if self.session:
                 await self.session.close()
     
@@ -113,47 +128,23 @@ class PriceMonitor:
         
         for pair in self.config.token_pairs:
             try:
-                # GraphQLクエリを構築
-                query = """
-                {
-                  pools(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderBy: liquidity, orderDirection: desc, first: 1) {
-                    id
-                    token0Price
-                    token1Price
-                    liquidity
-                    token0 {
-                      symbol
-                      id
-                    }
-                    token1 {
-                      symbol
-                      id
-                    }
-                  }
-                }
-                """ % (pair.base, pair.quote)
+                # 共通モジュールからクエリを取得
+                query = get_uniswap_query(pair.base, pair.quote)
                 
-                async with self.session.post(dex_config.api_url, json={"query": query}) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        pools = data.get("data", {}).get("pools", [])
-                        
-                        if pools:
-                            pool = pools[0]
-                            token0_symbol = pool["token0"]["symbol"]
-                            token1_symbol = pool["token1"]["symbol"]
-                            
-                            # 正しい方向の価格を選択
-                            if token0_symbol.upper() == pair.base:
-                                price = float(pool["token1Price"])
-                            else:
-                                price = float(pool["token0Price"])
-                            
-                            prices[str(pair)] = {
-                                "price": price,
-                                "liquidity": float(pool["liquidity"]) if "liquidity" in pool else 0,
-                                "timestamp": int(time.time())
-                            }
+                # GraphQLクライアントを使用してクエリ実行
+                response = await self.graphql_client.execute_simple(dex_config.api_url, query)
+                
+                # レスポンスをパース
+                parsed_pools = parse_uniswap_response(response, pair.base, pair.quote)
+                
+                if parsed_pools:
+                    # 最も流動性の高いプールを使用
+                    pool = parsed_pools[0]
+                    prices[str(pair)] = {
+                        "price": pool["price"],
+                        "liquidity": pool["liquidity"],
+                        "timestamp": pool["timestamp"]
+                    }
             except Exception as e:
                 logger.error(f"Uniswap V3からの価格取得中にエラーが発生しました({pair}): {e}")
         
@@ -165,103 +156,71 @@ class PriceMonitor:
         
         for pair in self.config.token_pairs:
             try:
-                # GraphQLクエリを構築
-                query = """
-                {
-                  pools(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderBy: totalValueLockedUSD, orderDirection: desc, first: 1) {
-                    id
-                    token0Price
-                    token1Price
-                    totalValueLockedUSD
-                    token0 {
-                      symbol
-                      id
-                    }
-                    token1 {
-                      symbol
-                      id
-                    }
-                  }
-                }
-                """ % (pair.base, pair.quote)
+                # 共通モジュールからクエリを取得
+                query = get_quickswap_query(pair.base, pair.quote)
                 
-                async with self.session.post(dex_config.api_url, json={"query": query}) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        pools = data.get("data", {}).get("pools", [])
-                        
-                        if pools:
-                            pool = pools[0]
-                            token0_symbol = pool["token0"]["symbol"]
-                            token1_symbol = pool["token1"]["symbol"]
-                            
-                            # 正しい方向の価格を選択
-                            if token0_symbol.upper() == pair.base:
-                                price = float(pool["token1Price"])
-                            else:
-                                price = float(pool["token0Price"])
-                            
-                            prices[str(pair)] = {
-                                "price": price,
-                                "liquidity": float(pool.get("totalValueLockedUSD", 0)),
-                                "timestamp": int(time.time())
-                            }
+                # GraphQLクライアントを使用してクエリ実行
+                response = await self.graphql_client.execute_simple(dex_config.api_url, query)
+                
+                # レスポンスをパース
+                parsed_pools = parse_quickswap_response(response, pair.base, pair.quote)
+                
+                if parsed_pools:
+                    # 最も流動性の高いプールを使用
+                    pool = parsed_pools[0]
+                    prices[str(pair)] = {
+                        "price": pool["price"],
+                        "liquidity": pool["liquidity"],
+                        "timestamp": pool["timestamp"]
+                    }
             except Exception as e:
                 logger.error(f"QuickSwapからの価格取得中にエラーが発生しました({pair}): {e}")
         
         return prices
     
     async def _fetch_sushiswap_prices(self, dex_config) -> Dict[str, Any]:
-        """SushiSwapから価格データを取得する"""
+        """SushiSwapから価格データを取得する (クライアントサイドフィルタリング版)"""
         prices = {}
         
-        for pair in self.config.token_pairs:
-            try:
-                # GraphQLクエリを構築
-                query = """
-                {
-                  pairs(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderDirection: desc, first: 1) {
-                    id
-                    token0Price
-                    token1Price
-                    token0 {
-                      symbol
-                      id
-                    }
-                    token1 {
-                      symbol
-                      id
-                    }
-                  }
-                }
-                """ % (pair.base, pair.quote)
-                
-                async with self.session.post(dex_config.api_url, json={"query": query}) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        pairs_data = data.get("data", {}).get("pairs", [])
-                        
-                        if pairs_data:
-                            pair_data = pairs_data[0]
-                            token0_symbol = pair_data["token0"]["symbol"]
-                            token1_symbol = pair_data["token1"]["symbol"]
-                            
-                            # 正しい方向の価格を選択
-                            if token0_symbol.upper() == pair.base:
-                                price = float(pair_data["token1Price"])
-                            else:
-                                price = float(pair_data["token0Price"])
-                            
-                            prices[str(pair)] = {
-                                "price": price,
-                                "liquidity": float(pair_data.get("reserveUSD", 0)),
-                                "timestamp": int(time.time())
-                            }
-            except Exception as e:
-                logger.error(f"SushiSwapからの価格取得中にエラーが発生しました({pair}): {e}")
+        try:
+            # すべてのペアを一度に取得（1回のAPI呼び出しで済ますため）
+            query = get_sushiswap_query("", "", 500)  # パラメータは使用しないが、関数シグネチャに合わせて空文字を渡す
+            
+            # デバッグ: クエリをログ出力
+            logger.debug(f"SushiSwap query (client-side filtering): {query.strip()}")
+            
+            # GraphQLクライアントを使用してクエリ実行
+            response = await self.graphql_client.execute_simple(dex_config.api_url, query)
+            
+            # APIから取得したペアの総数をログ出力
+            total_pairs = len(response.get("data", {}).get("pairs", []))
+            logger.debug(f"SushiSwap: 合計 {total_pairs} ペアを取得しました")
+            
+            # 各通貨ペアについて、取得したデータから該当するものをフィルタリング
+            for pair in self.config.token_pairs:
+                try:
+                    # 特定のペアに絞ったパース処理を行う
+                    parsed_pairs = parse_sushiswap_response(response, pair.base, pair.quote)
+                    
+                    if parsed_pairs:
+                        # 最も適切なペアを使用（複数ある場合は先頭を使用）
+                        pair_data = parsed_pairs[0]
+                        prices[str(pair)] = {
+                            "price": pair_data["price"],
+                            "liquidity": pair_data["liquidity"],
+                            "timestamp": pair_data["timestamp"]
+                        }
+                        logger.debug(f"SushiSwap: {pair} の価格を見つけました: {pair_data['price']}")
+                    else:
+                        logger.debug(f"SushiSwap: {pair} に一致するペアが見つかりませんでした")
+                except Exception as e:
+                    logger.error(f"SushiSwap: {pair} の処理中にエラーが発生しました: {e}")
+            
+        except Exception as e:
+            logger.error(f"SushiSwapからの価格取得中にエラーが発生しました: {e}", exc_info=True)
         
         return prices
-    
+
     async def _fetch_curve_prices(self, dex_config) -> Dict[str, Any]:
         """Curveから価格データを取得する"""
         prices = {}
@@ -305,64 +264,72 @@ class PriceMonitor:
         return prices
     
     async def _fetch_balancer_prices(self, dex_config) -> Dict[str, Any]:
+        """Balancerから価格データを取得する (クライアントサイドフィルタリング版)"""
+        prices = {}
+        
+        try:
+            # すべてのプールを一度に取得（1回のAPI呼び出しで済ますため）
+            query = get_balancer_query("", "", 200)  # パラメータは使用しないが、関数シグネチャに合わせて空文字を渡す
+            
+            # デバッグ: クエリをログ出力
+            logger.debug(f"Balancer query (client-side filtering): {query.strip()}")
+            
+            # GraphQLクライアントを使用してクエリ実行
+            response = await self.graphql_client.execute_simple(dex_config.api_url, query)
+            logger.debug(f"Balancer response: {response}")
+            
+            # APIから取得したプールの総数をログ出力
+            total_pools = len(response.get("data", {}).get("pools", []))
+            logger.debug(f"Balancer: 合計 {total_pools} プールを取得しました")
+            
+            # 各通貨ペアについて、取得したデータから該当するものをフィルタリング
+            for pair in self.config.token_pairs:
+                try:
+                    # 特定のペアに絞ったパース処理を行う
+                    parsed_pools = parse_balancer_response(response, pair.base, pair.quote)
+                    
+                    if parsed_pools:
+                        # 最も流動性の高いプールを使用（複数ある場合は先頭を使用）
+                        pool = parsed_pools[0]
+                        prices[str(pair)] = {
+                            "price": pool["price"],
+                            "liquidity": pool["liquidity"],
+                            "timestamp": pool["timestamp"]
+                        }
+                        logger.debug(f"Balancer: {pair} の価格を見つけました: {pool['price']}")
+                    else:
+                        logger.debug(f"Balancer: {pair} に一致するプールが見つかりませんでした")
+                except Exception as e:
+                    logger.error(f"Balancer: {pair} の処理中にエラーが発生しました: {e}")
+            
+        except Exception as e:
+            logger.error(f"Balancerからの価格取得中にエラーが発生しました: {e}", exc_info=True)
+        
+        return prices
+
         """Balancerから価格データを取得する"""
         prices = {}
         
         for pair in self.config.token_pairs:
             try:
-                # GraphQLクエリを構築
-                query = """
-              n  {
-                  pools(where: {
-                    tokensList_contains_nocase: ["%s", "%s"]
-                  }, orderBy: totalLiquidity, orderDirection: desc, first: 1) {
-                    id
-                    totalLiquidity
-                    tokens {
-                      symbol
-                      address
-                      priceRate
-                    }
-                  }
-                }
-                """ % (pair.base, pair.quote)
+                # 共通モジュールからクエリを取得
+                query = get_balancer_query(pair.base, pair.quote)
                 
-                async with self.session.post(dex_config.api_url, json={"query": query}) as response:
-                    logger.debug(f"query: {query}")
-                    if response.status == 200:
-                        data = await response.json()
-                        logger.debug(f"Balancer response: {data}")
-                        pools = data.get("data", {}).get("pools", [])
-                        
-                        if pools and pools[0]["tokens"]:
-                            pool = pools[0]
-                            tokens = pool["tokens"]
-                            
-                            # ベーストークンとクオートトークンを探す
-                            base_token = None
-                            quote_token = None
-                            
-                            for token in tokens:
-                                if token["symbol"].upper() == pair.base:
-                                    base_token = token
-                                elif token["symbol"].upper() == pair.quote:
-                                    quote_token = token
-                            
-                            if base_token and quote_token and \
-                               base_token.get("latestPrice") and \
-                               quote_token.get("latestPrice"):
-                                
-                                base_price = float(base_token["latestPrice"]["price"])
-                                quote_price = float(quote_token["latestPrice"]["price"])
-                                
-                                if quote_price > 0:
-                                    price = base_price / quote_price
-                                    
-                                    prices[str(pair)] = {
-                                        "price": price,
-                                        "liquidity": float(pool.get("totalLiquidity", 0)),
-                                        "timestamp": int(time.time())
-                                    }
+                # GraphQLクライアントを使用してクエリ実行
+                response = await self.graphql_client.execute_simple(dex_config.api_url, query)
+                logger.debug(f"Balancer response: {response}")
+                
+                # レスポンスをパース
+                parsed_pools = parse_balancer_response(response, pair.base, pair.quote)
+                
+                if parsed_pools:
+                    # 最も流動性の高いプールを使用
+                    pool = parsed_pools[0]
+                    prices[str(pair)] = {
+                        "price": pool["price"],
+                        "liquidity": pool["liquidity"],
+                        "timestamp": pool["timestamp"]
+                    }
             except Exception as e:
                 logger.error(f"Balancerからの価格取得中にエラーが発生しました({pair}): {e}")
         
