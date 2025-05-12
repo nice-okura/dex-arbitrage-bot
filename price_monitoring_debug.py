@@ -14,6 +14,19 @@ from src.config import AppConfig, TokenPair
 from src.data_management import DataManager
 from debug_graphql_monitor import TracedSession
 
+# 共通GraphQLモジュールをインポート
+from src.graphql import (
+    GraphQLClient,
+    get_uniswap_query,
+    get_sushiswap_query,
+    get_quickswap_query,
+    get_balancer_query,
+    parse_uniswap_response,
+    parse_sushiswap_response,
+    parse_quickswap_response,
+    parse_balancer_response
+)
+
 # ロギングの設定
 logger = logging.getLogger("dex_arbitrage_bot.price_monitoring_debug")
 
@@ -53,6 +66,9 @@ class DebugPriceMonitor:
         
         # トレースセッションを作成
         async with TracedSession(monitor_enabled=self.debug_mode, save_responses=self.save_responses) as session:
+            # GraphQLクライアントの初期化
+            graphql_client = GraphQLClient(session=session, debug=self.debug_mode)
+            
             # 各DEXに対してテスト実行
             for dex_id, dex_config in self.config.dexes.items():
                 logger.info(f"テスト: {dex_config.name}")
@@ -63,15 +79,15 @@ class DebugPriceMonitor:
                     
                     try:
                         if dex_id == "uniswap_v3":
-                            result = await self._test_uniswap_prices(session, dex_config, pair)
+                            result = await self._test_uniswap_prices(graphql_client, dex_config, pair)
                         elif dex_id == "quickswap":
-                            result = await self._test_quickswap_prices(session, dex_config, pair)
+                            result = await self._test_quickswap_prices(graphql_client, dex_config, pair)
                         elif dex_id == "sushiswap":
-                            result = await self._test_sushiswap_prices(session, dex_config, pair)
+                            result = await self._test_sushiswap_prices(graphql_client, dex_config, pair)
                         elif dex_id == "curve":
                             result = await self._test_curve_prices(session, dex_config, pair)
                         elif dex_id == "balancer":
-                            result = await self._test_balancer_prices(session, dex_config, pair)
+                            result = await self._test_balancer_prices(graphql_client, dex_config, pair)
                         
                         # 結果をログに出力
                         if result:
@@ -105,153 +121,89 @@ class DebugPriceMonitor:
         
         logger.info("すべてのDEXクエリのテストが完了しました")
     
-    async def _test_uniswap_prices(self, session, dex_config, pair: TokenPair) -> Dict[str, Any]:
+    async def _test_uniswap_prices(self, graphql_client, dex_config, pair: TokenPair) -> Dict[str, Any]:
         """Uniswap V3のGraphQLクエリをテスト"""
         # GraphQLクエリを構築
-        query = """
-        {
-          pools(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderBy: liquidity, orderDirection: desc, first: 1) {
-            id
-            token0Price
-            token1Price
-            liquidity
-            token0 {
-              symbol
-              id
-            }
-            token1 {
-              symbol
-              id
-            }
-          }
-        }
-        """ % (pair.base, pair.quote)
+        query = get_uniswap_query(pair.base, pair.quote, 5)
+        
+        logger.debug(f"Uniswap V3クエリ: {query}")
         
         # クエリを実行
-        async with session.post(dex_config.api_url, json={"query": query}) as response:
-            if response.status == 200:
-                data = await response.json()
-                pools = data.get("data", {}).get("pools", [])
-                
-                if pools:
-                    pool = pools[0]
-                    token0_symbol = pool["token0"]["symbol"]
-                    token1_symbol = pool["token1"]["symbol"]
-                    
-                    # 正しい方向の価格を選択
-                    if token0_symbol.upper() == pair.base:
-                        price = float(pool["token1Price"])
-                    else:
-                        price = float(pool["token0Price"])
-                    
-                    return {
-                        "price": price,
-                        "liquidity": float(pool["liquidity"]) if "liquidity" in pool else 0,
-                        "pool_id": pool["id"],
-                        "token0": token0_symbol,
-                        "token1": token1_symbol,
-                        "timestamp": int(time.time())
-                    }
+        response = await graphql_client.execute_simple(dex_config.api_url, query)
+        
+        # レスポンスをパース
+        parsed_pools = parse_uniswap_response(response, pair.base, pair.quote)
+        
+        if parsed_pools:
+            # 最も流動性の高いプールを使用
+            pool = parsed_pools[0]
+            return {
+                "price": pool["price"],
+                "liquidity": pool["liquidity"],
+                "pool_id": pool["pool_id"],
+                "base_token": pool["base_token"],
+                "quote_token": pool["quote_token"],
+                "timestamp": int(time.time())
+            }
         
         return None
     
-    async def _test_quickswap_prices(self, session, dex_config, pair: TokenPair) -> Dict[str, Any]:
+    async def _test_quickswap_prices(self, graphql_client, dex_config, pair: TokenPair) -> Dict[str, Any]:
         """QuickSwapのGraphQLクエリをテスト"""
         # GraphQLクエリを構築
-        query = """
-        {
-          pools(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderBy: totalValueLockedUSD, orderDirection: desc, first: 1) {
-            id
-            token0Price
-            token1Price
-            totalValueLockedUSD
-            token0 {
-              symbol
-              id
-            }
-            token1 {
-              symbol
-              id
-            }
-          }
-        }
-        """ % (pair.base, pair.quote)
+        query = get_quickswap_query(pair.base, pair.quote, 5)
+        
+        logger.debug(f"QuickSwapクエリ: {query}")
         
         # クエリを実行
-        async with session.post(dex_config.api_url, json={"query": query}) as response:
-            if response.status == 200:
-                data = await response.json()
-                pools = data.get("data", {}).get("pools", [])
-                
-                if pools:
-                    pool = pools[0]
-                    token0_symbol = pool["token0"]["symbol"]
-                    token1_symbol = pool["token1"]["symbol"]
-                    
-                    # 正しい方向の価格を選択
-                    if token0_symbol.upper() == pair.base:
-                        price = float(pool["token1Price"])
-                    else:
-                        price = float(pool["token0Price"])
-                    
-                    return {
-                        "price": price,
-                        "liquidity": float(pool.get("totalValueLockedUSD", 0)),
-                        "pool_id": pool["id"],
-                        "token0": token0_symbol,
-                        "token1": token1_symbol,
-                        "timestamp": int(time.time())
-                    }
+        response = await graphql_client.execute_simple(dex_config.api_url, query)
+        
+        # レスポンスをパース
+        parsed_pools = parse_quickswap_response(response, pair.base, pair.quote)
+        
+        if parsed_pools:
+            # 最も流動性の高いプールを使用
+            pool = parsed_pools[0]
+            return {
+                "price": pool["price"],
+                "liquidity": pool["liquidity"],
+                "pool_id": pool["pool_id"],
+                "base_token": pool["base_token"],
+                "quote_token": pool["quote_token"],
+                "timestamp": int(time.time())
+            }
         
         return None
     
-    async def _test_sushiswap_prices(self, session, dex_config, pair: TokenPair) -> Dict[str, Any]:
-        """SushiSwapのGraphQLクエリをテスト"""
-        # GraphQLクエリを構築
-        query = """
-        {
-          pairs(where: {token0_: {symbol_contains_nocase: "%s"}, token1_: {symbol_contains_nocase: "%s"}}, orderBy: reserveUSD, orderDirection: desc, first: 1) {
-            id
-            token0Price
-            token1Price
-            reserveUSD
-            token0 {
-              symbol
-              id
-            }
-            token1 {
-              symbol
-              id
-            }
-          }
-        }
-        """ % (pair.base, pair.quote)
+    async def _test_sushiswap_prices(self, graphql_client, dex_config, pair: TokenPair) -> Dict[str, Any]:
+        """SushiSwapのGraphQLクエリをテスト（where句なし、クライアントサイドフィルタリング）"""
+        # GraphQLクエリを構築（where句なし）
+        query = get_sushiswap_query(pair.base, pair.quote, 100)
+        
+        logger.debug(f"SushiSwapクエリ（クライアントサイドフィルタリング）: {query}")
         
         # クエリを実行
-        async with session.post(dex_config.api_url, json={"query": query}) as response:
-            if response.status == 200:
-                data = await response.json()
-                pairs_data = data.get("data", {}).get("pairs", [])
-                
-                if pairs_data:
-                    pair_data = pairs_data[0]
-                    token0_symbol = pair_data["token0"]["symbol"]
-                    token1_symbol = pair_data["token1"]["symbol"]
-                    
-                    # 正しい方向の価格を選択
-                    if token0_symbol.upper() == pair.base:
-                        price = float(pair_data["token1Price"])
-                    else:
-                        price = float(pair_data["token0Price"])
-                    
-                    return {
-                        "price": price,
-                        "liquidity": float(pair_data.get("reserveUSD", 0)),
-                        "pool_id": pair_data["id"],
-                        "token0": token0_symbol,
-                        "token1": token1_symbol,
-                        "timestamp": int(time.time())
-                    }
+        response = await graphql_client.execute_simple(dex_config.api_url, query)
+        
+        # 全ペア数をログ出力
+        total_pairs = len(response.get("data", {}).get("pairs", []))
+        logger.debug(f"SushiSwap: 合計 {total_pairs} ペアを取得しました")
+        
+        # レスポンスをパース（クライアントサイドでフィルタリング）
+        parsed_pairs = parse_sushiswap_response(response, pair.base, pair.quote)
+        
+        if parsed_pairs:
+            # 最も適切なペアを使用
+            pair_data = parsed_pairs[0]
+            return {
+                "price": pair_data["price"],
+                "liquidity": pair_data["liquidity"],
+                "pool_id": pair_data["pool_id"],
+                "base_token": pair_data["base_token"],
+                "quote_token": pair_data["quote_token"],
+                "timestamp": int(time.time()),
+                "filtered_from": total_pairs
+            }
         
         return None
     
@@ -269,10 +221,10 @@ class DebugPriceMonitor:
                 for pool in pools_data:
                     tokens = [t.get("symbol", "").upper() for t in pool.get("coins", [])]
                     
-                    if pair.base in tokens and pair.quote in tokens:
+                    if pair.base.upper() in tokens and pair.quote.upper() in tokens:
                         # インデックスを取得
-                        base_idx = tokens.index(pair.base)
-                        quote_idx = tokens.index(pair.quote)
+                        base_idx = tokens.index(pair.base.upper())
+                        quote_idx = tokens.index(pair.quote.upper())
                         
                         # 価格データが利用可能な場合
                         if "usdPrices" in pool:
@@ -295,66 +247,35 @@ class DebugPriceMonitor:
         
         return None
     
-    async def _test_balancer_prices(self, session, dex_config, pair: TokenPair) -> Dict[str, Any]:
-        """Balancerの価格取得をテスト"""
-        # GraphQLクエリを構築
-        query = """
-        {
-          pools(where: {
-            tokensList_contains_nocase: ["%s", "%s"]
-          }, orderBy: totalLiquidity, orderDirection: desc, first: 1) {
-            id
-            totalLiquidity
-            tokens {
-              symbol
-              address
-              latestPrice {
-                price
-              }
-            }
-          }
-        }
-        """ % (pair.base, pair.quote)
+    async def _test_balancer_prices(self, graphql_client, dex_config, pair: TokenPair) -> Dict[str, Any]:
+        """Balancerの価格取得をテスト（where句なし、クライアントサイドフィルタリング）"""
+        # GraphQLクエリを構築（where句なし）
+        query = get_balancer_query(pair.base, pair.quote, 100)
+        
+        logger.debug(f"Balancerクエリ（クライアントサイドフィルタリング）: {query}")
         
         # クエリを実行
-        async with session.post(dex_config.api_url, json={"query": query}) as response:
-            if response.status == 200:
-                data = await response.json()
-                pools = data.get("data", {}).get("pools", [])
-                
-                if pools and pools[0]["tokens"]:
-                    pool = pools[0]
-                    tokens = pool["tokens"]
-                    
-                    # ベーストークンとクオートトークンを探す
-                    base_token = None
-                    quote_token = None
-                    
-                    for token in tokens:
-                        if token["symbol"].upper() == pair.base:
-                            base_token = token
-                        elif token["symbol"].upper() == pair.quote:
-                            quote_token = token
-                    
-                    if base_token and quote_token and \
-                       base_token.get("latestPrice") and \
-                       quote_token.get("latestPrice"):
-                        
-                        base_price = float(base_token["latestPrice"]["price"])
-                        quote_price = float(quote_token["latestPrice"]["price"])
-                        
-                        if quote_price > 0:
-                            price = base_price / quote_price
-                            
-                            return {
-                                "price": price,
-                                "liquidity": float(pool.get("totalLiquidity", 0)),
-                                "pool_id": pool["id"],
-                                "base_token_price": base_price,
-                                "quote_token_price": quote_price,
-                                "token_count": len(tokens),
-                                "timestamp": int(time.time())
-                            }
+        response = await graphql_client.execute_simple(dex_config.api_url, query)
+        
+        # 全プール数をログ出力
+        total_pools = len(response.get("data", {}).get("pools", []))
+        logger.debug(f"Balancer: 合計 {total_pools} プールを取得しました")
+        
+        # レスポンスをパース（クライアントサイドでフィルタリング）
+        parsed_pools = parse_balancer_response(response, pair.base, pair.quote)
+        
+        if parsed_pools:
+            # 最も流動性の高いプールを使用
+            pool = parsed_pools[0]
+            return {
+                "price": pool["price"],
+                "liquidity": pool["liquidity"],
+                "pool_id": pool["pool_id"],
+                "base_token": pool["base_token"],
+                "quote_token": pool["quote_token"],
+                "timestamp": int(time.time()),
+                "filtered_from": total_pools
+            }
         
         return None
     
@@ -377,9 +298,51 @@ class DebugPriceMonitor:
 
 async def main():
     """テスト実行用のメイン関数"""
+    # コマンドライン引数のパース
+    import argparse
+    parser = argparse.ArgumentParser(description="DEX価格モニタリングのデバッグツール")
+    parser.add_argument("--debug", action="store_true", help="詳細なデバッグ情報を出力します")
+    parser.add_argument("--save", action="store_true", help="GraphQLレスポンスを保存します")
+    parser.add_argument("--dex", choices=["all", "uniswap", "quickswap", "sushiswap", "curve", "balancer"], 
+                        default="all", help="テスト対象のDEX（デフォルト: すべて）")
+    parser.add_argument("--pair", help="テスト対象の通貨ペア（例: ETH/USDT）")
+    args = parser.parse_args()
+    
+    # デバッグモード設定
+    if args.debug:
+        os.environ["DEBUG"] = "true"
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # レスポンス保存設定
+    if args.save:
+        os.environ["SAVE_RESPONSES"] = "true"
+    
     # 設定を読み込み
     from src.config import AppConfig
     config = AppConfig()
+    
+    # 通貨ペアフィルタ設定
+    if args.pair:
+        base, quote = args.pair.split("/")
+        filtered_pairs = []
+        for pair in config.token_pairs:
+            if pair.base.upper() == base.upper() and pair.quote.upper() == quote.upper():
+                filtered_pairs.append(pair)
+        if filtered_pairs:
+            config.token_pairs = filtered_pairs
+        else:
+            logger.warning(f"指定された通貨ペア {args.pair} は設定に存在しません。すべての通貨ペアをテストします。")
+    
+    # DEXフィルタ設定
+    if args.dex != "all":
+        filtered_dexes = {}
+        for dex_id, dex_config in config.dexes.items():
+            if dex_id == args.dex:
+                filtered_dexes[dex_id] = dex_config
+        if filtered_dexes:
+            config.dexes = filtered_dexes
+        else:
+            logger.warning(f"指定されたDEX {args.dex} は設定に存在しません。すべてのDEXをテストします。")
     
     # デバッグツールを初期化
     debug_monitor = DebugPriceMonitor(config)
@@ -388,5 +351,11 @@ async def main():
     await debug_monitor.test_all_dex_queries()
 
 if __name__ == "__main__":
+    # ロギングの基本設定
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    
     # テスト実行
     asyncio.run(main())
